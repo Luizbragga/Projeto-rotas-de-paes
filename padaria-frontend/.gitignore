@@ -1,0 +1,35 @@
+# Dependências
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+
+# Build / Vite
+dist/
+.cache/
+.vite/
+vite.config.*.timestamp-*
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Testes / Coverage
+coverage/
+*.lcov
+.nyc_output
+
+# Outros caches
+.eslintcache
+.stylelintcache
+.parcel-cache
