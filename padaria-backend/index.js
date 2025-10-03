@@ -3,13 +3,13 @@ require("dotenv").config();
 
 const express = require("express");
 const app = express();
-
 const logger = require("./logs/utils/logger");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cors = require("cors"); // ✅ apenas UMA importação
 const cron = require("node-cron");
 const rateLimit = require("express-rate-limit");
+const requestId = require("./middlewares/requestId");
 
 // se usar ngrok/proxy, ajuda:
 app.set("trust proxy", 1);
@@ -48,7 +48,8 @@ app.options(/.*/, cors(corsOptions));
 /* ================================================= */
 
 /* ================== Middlewares ================== */
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan("dev"));
 
@@ -60,6 +61,9 @@ const limiter = rateLimit({
   },
 });
 app.use(limiter);
+
+// ====== HARDENING: correlação/limites/timeout ======
+app.use(requestId());
 /* ================================================= */
 
 /* ======================= CRON ==================== */
@@ -91,6 +95,36 @@ if (typeof gerarEntregasDoDia === "function") {
 }
 /* ================================================= */
 
+// Timeout educado: se a conexão ficar pendurada por muito tempo, fecha.
+const REQUEST_TIMEOUT_MS = 30_000; // 30s
+
+app.use((req, res, next) => {
+  // aplica no socket/req; alguns proxies honram isso
+  try {
+    req.setTimeout(REQUEST_TIMEOUT_MS);
+  } catch {}
+  try {
+    res.setTimeout?.(REQUEST_TIMEOUT_MS);
+  } catch {}
+
+  // fallback manual: encerra resposta se passar do tempo
+  const t = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(503).json({
+        erro: "Request timeout",
+        requestId: req.requestId || null,
+      });
+    }
+    try {
+      res.end();
+    } catch {}
+  }, REQUEST_TIMEOUT_MS + 500); // leve folga
+
+  res.on("finish", () => clearTimeout(t));
+  res.on("close", () => clearTimeout(t));
+  next();
+});
+
 /* ======================= Rotas =================== */
 app.get("/", (_req, res) => res.send("Olá, Sistema de Entregas da Padaria!"));
 // === Preflight CORS mais permissivo (cole ANTES das rotas) ===
@@ -120,6 +154,18 @@ app.use((req, res, next) => {
   }
 
   next();
+});
+// handler final (depois das rotas)
+app.use((err, req, res, _next) => {
+  const status = err.status || err.statusCode || 500;
+  const body = {
+    erro: err.message || "Erro interno",
+    requestId: req.requestId || null,
+  };
+  if (process.env.NODE_ENV !== "production" && err.stack) {
+    body.stack = err.stack; // só em dev
+  }
+  res.status(status).json(body);
 });
 
 app.use("/api/login", require("./routes/login"));
