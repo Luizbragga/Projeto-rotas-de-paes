@@ -9,6 +9,7 @@ const crypto = require("crypto");
 const Usuario = require("../models/Usuario");
 const RefreshToken = require("../models/RefreshToken");
 const hashToken = require("../utils/hashToken");
+const validate = require("../middlewares/validate");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -51,12 +52,8 @@ async function criarRefreshToken(usuarioId) {
 /**
  * POST /login
  */
-router.post("/", async (req, res) => {
+router.post("/", validate(loginSchema), async (req, res) => {
   try {
-    // validação
-    const { error } = loginSchema.validate(req.body);
-    if (error) return res.status(400).json({ erro: error.details[0].message });
-
     // usuário
     const usuario = await Usuario.findOne({ nome: req.body.nome });
     if (!usuario)
@@ -70,12 +67,21 @@ router.post("/", async (req, res) => {
     await RefreshToken.deleteMany({ usuario: usuario._id });
 
     // gera tokens
+    // gera tokens
     const token = gerarAccessToken(usuario);
     const refreshToken = await criarRefreshToken(usuario._id);
 
+    // grava refresh token em cookie httpOnly
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production", // usa https em produção
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 dias
+    });
+
+    // responde apenas com o access token e dados do usuário (sem refreshToken)
     return res.json({
       token,
-      refreshToken,
       usuario: {
         id: usuario._id,
         nome: usuario.nome,
@@ -100,7 +106,8 @@ router.post("/", async (req, res) => {
  */
 router.post("/token/refresh", async (req, res) => {
   try {
-    const { refreshToken } = req.body || {};
+    // tenta obter o refreshToken do corpo ou do cookie
+    const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
     if (!refreshToken) {
       return res.status(400).json({ erro: "refreshToken é obrigatório" });
     }
@@ -112,6 +119,10 @@ router.post("/token/refresh", async (req, res) => {
 
     if (!registro) {
       return res.status(401).json({ erro: "Refresh token inválido" });
+    }
+    // impede uso de tokens revogados
+    if (registro.revogadoEm) {
+      return res.status(401).json({ erro: "Refresh token revogado" });
     }
 
     if (registro.expiraEm && registro.expiraEm.getTime() < Date.now()) {
@@ -143,11 +154,19 @@ router.post("/token/refresh", async (req, res) => {
  */
 router.post("/logout", async (req, res) => {
   try {
-    const { refreshToken } = req.body || {};
-    if (!refreshToken) return res.json({ ok: true });
+    // obtém o refreshToken do corpo ou do cookie; se inexistente, simplesmente retorna
+    const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
+    if (!refreshToken) {
+      return res.json({ ok: true });
+    }
 
     const tokenHash = hashToken(refreshToken);
-    await RefreshToken.deleteOne({ tokenHash });
+    const registro = await RefreshToken.findOne({ tokenHash });
+    if (registro) {
+      await registro.revogar("logout");
+    }
+    // remove o cookie de refresh do cliente
+    res.clearCookie("refreshToken");
     return res.json({ ok: true });
   } catch (err) {
     console.error("Erro no logout:", err);
