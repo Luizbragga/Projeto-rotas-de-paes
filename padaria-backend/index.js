@@ -9,7 +9,6 @@ const app = express();
 
 // sanitização global contra operadores perigosos do Mongo ($, .)
 const sanitizeRequest = require("./middlewares/sanitizeRequest");
-app.use(sanitizeRequest);
 
 const cookieParser = require("cookie-parser");
 const logger = require("./logs/utils/logger");
@@ -57,6 +56,7 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(sanitizeRequest);
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan("dev"));
 app.use(blockMongoOperators());
