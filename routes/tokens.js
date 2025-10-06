@@ -49,7 +49,7 @@ function buildAccessPayload(usuario) {
  * Retorna: { token, refreshToken }   // faz rotação do refresh token
  */
 router.post("/refresh", async (req, res) => {
-  const { refreshToken } = req.body;
+  const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
   if (!refreshToken) {
     return res.status(401).json({ erro: "Refresh token ausente." });
   }
@@ -60,6 +60,10 @@ router.post("/refresh", async (req, res) => {
     const tokenDoc = await RefreshToken.findOne({ tokenHash });
     if (!tokenDoc) {
       return res.status(403).json({ erro: "Refresh token inválido." });
+    }
+    // se o token foi revogado explicitamente, bloqueia
+    if (tokenDoc.revogadoEm) {
+      return res.status(403).json({ erro: "Refresh token revogado." });
     }
 
     // 2) confere expiração
@@ -114,20 +118,20 @@ router.post("/refresh", async (req, res) => {
  * Se quiser “logout global”, deleteMany por usuario.
  */
 router.post("/logout", async (req, res) => {
-  const { refreshToken } = req.body;
-
+  const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
   if (!refreshToken) {
     return res.status(400).json({ erro: "Refresh token obrigatório." });
   }
 
   try {
     const tokenHash = hashToken(refreshToken);
-    const resultado = await RefreshToken.deleteOne({ tokenHash });
-
-    if (resultado.deletedCount === 0) {
+    const registro = await RefreshToken.findOne({ tokenHash });
+    if (!registro) {
       return res.status(404).json({ erro: "Refresh token não encontrado." });
     }
-
+    await registro.revogar("logout");
+    // remove o cookie de refresh do cliente
+    res.clearCookie("refreshToken");
     return res.json({ mensagem: "Logout realizado com sucesso." });
   } catch (err) {
     console.error("Erro no logout:", err);

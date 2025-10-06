@@ -7,7 +7,17 @@ const Cliente = require("../models/Cliente");
 const EntregaAvulsa = require("../models/EntregaAvulsa");
 const ClienteAjustePontual = require("../models/ClienteAjustePontual");
 
-// ——— helpers
+const {
+  mediaProdutosQuerySchema,
+  entregasPorDiaQuerySchema,
+  inadimplenciaQuerySchema,
+  pagamentosDetalhadosQuerySchema,
+  aReceberMensalQuerySchema,
+  pendenciasDoMesQuerySchema,
+  pendenciasAnuaisQuerySchema,
+} = require("../validations/analitico");
+
+// helpers
 const toObjectIdIfValid = (v) =>
   mongoose.Types.ObjectId.isValid(v) ? new mongoose.Types.ObjectId(v) : v;
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -41,9 +51,9 @@ const sumPagamentos = (entrega) => {
   );
 };
 
-// === helpers de mês ===
+// helpers de mês
 function mesRange(mesStr) {
-  // mesStr no formato 'YYYY-MM'; se vazio, usa mês corrente
+  // mes no formato 'YYYY-MM'; se vazio, usa mês corrente
   const hoje = new Date();
   const [y, m] = (
     mesStr ||
@@ -52,11 +62,11 @@ function mesRange(mesStr) {
     .split("-")
     .map(Number);
   const ini = new Date(y, m - 1, 1, 0, 0, 0, 0);
-  const fim = new Date(y, m, 1, 0, 0, 0, 0); // primeiro dia do mês seguinte
+  const fim = new Date(y, m, 1, 0, 0, 0, 0);
   return { ini, fim, mesStr: `${y}-${String(m).padStart(2, "0")}` };
 }
 
-// --- helpers para previsão por padrão semanal ---
+// helpers para previsão por padrão semanal
 const DIA_KEYS = [
   "domingo",
   "segunda",
@@ -77,7 +87,6 @@ const POP_PADRAO = [
 ].map((p) => ({ path: p, select: "nome preco" }));
 
 function diaKeyFromDate(d) {
-  // getDay(): 0=Dom ... 6=Sáb
   return DIA_KEYS[d.getDay()];
 }
 
@@ -85,7 +94,6 @@ function somaListaDoDia(lista = []) {
   let total = 0;
   for (const item of lista) {
     const qtd = Number(item?.quantidade) || 0;
-    // preço vem do populate do produto
     const preco =
       item?.produto && typeof item.produto === "object"
         ? Number(item.produto.preco) || 0
@@ -96,7 +104,6 @@ function somaListaDoDia(lista = []) {
 }
 
 function iterateDays(start, end, cb) {
-  // [start, end) exclusivo em end
   const d = new Date(start);
   while (d < end) {
     cb(d);
@@ -105,7 +112,7 @@ function iterateDays(start, end, cb) {
   }
 }
 
-// ===== AJUSTES PONTUAIS =====
+// AJUSTES PONTUAIS
 const somaItensAjuste = (itens = []) =>
   (Array.isArray(itens) ? itens : []).reduce((acc, it) => {
     const qtd = Number(it?.quantidade || 0);
@@ -117,7 +124,6 @@ const somaItensAjuste = (itens = []) =>
   }, 0);
 
 function buildAjusteMap(ajustesDocs = []) {
-  // Map<clienteId, Map<ISOdia, ajuste>>
   const map = new Map();
   for (const aj of ajustesDocs) {
     const cid = String(aj.cliente);
@@ -175,12 +181,19 @@ function previstoPorClienteNoPeriodoComAjustes(
   return round2(previsto);
 }
 
-/* ========== ENDPOINTS ========== */
+// ENDPOINTS
 
-// /analitico/entregas-por-dia
+// analitico/entregas-por-dia
 exports.entregasPorDia = async (req, res) => {
   try {
-    const padariaId = getPadariaFromReq(req);
+    // valida query e bloqueia extras
+    const { error: qErr, value: qVal } = entregasPorDiaQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    // mantém comportamento: se não vier padaria, agrega geral
+    const padariaId = qVal.padaria || getPadariaFromReq(req);
     const match = {};
     if (padariaId) match.padaria = toObjectIdIfValid(padariaId);
 
@@ -212,19 +225,22 @@ exports.entregasPorDia = async (req, res) => {
   }
 };
 
-// /analitico/inadimplencia
-// Retorna: { pagantes, inadimplentes }
-// /analitico/inadimplencia?padaria=...&mes=YYYY-MM (mes opcional; default = mês atual)
-// Regra: só é inadimplente quem ficou devendo ATÉ o final do mês anterior.
+// analitico/inadimplencia
 exports.inadimplencia = async (req, res) => {
   try {
-    const padariaId = getPadariaFromReq(req);
+    // valida query e bloqueia extras (mes opcional YYYY-MM; padaria opcional)
+    const { error: qErr, value: qVal } = inadimplenciaQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    const padariaId = qVal.padaria || getPadariaFromReq(req);
     if (!padariaId) return res.json({ pagantes: 0, inadimplentes: 0 });
 
     // pega início do mês selecionado (ou do mês atual)
-    const { ini } = mesRange(req.query.mes);
+    const { ini } = mesRange(qVal.mes);
 
-    // helpers UTC: comparar só a data para não “puxar” 01/M para M-1
+    // helpers UTC:
     const iniUTC = Date.UTC(
       ini.getUTCFullYear(),
       ini.getUTCMonth(),
@@ -235,7 +251,7 @@ exports.inadimplencia = async (req, res) => {
       return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
     };
 
-    // Total de clientes da padaria (para compor "pagantes")
+    // Total de clientes da padaria (para compor pagantes)
     const clientes = await Cliente.find({
       padaria: toObjectIdIfValid(padariaId),
     })
@@ -243,7 +259,7 @@ exports.inadimplencia = async (req, res) => {
       .lean();
     const totalClientes = clientes.length;
 
-    // Todas as entregas criadas ANTES do início do mês corrente/selecionado
+    // Todas as entregas criadas ANTES do início do mês corrente selecionado
     const entregasAnteriores = await Entrega.find({
       padaria: toObjectIdIfValid(padariaId),
       createdAt: { $lt: ini },
@@ -252,7 +268,7 @@ exports.inadimplencia = async (req, res) => {
       .lean();
 
     // Calcula pendência acumulada por cliente até o mês anterior
-    const pendAnteriorPorCliente = new Map(); // clienteId -> valor em aberto
+    const pendAnteriorPorCliente = new Map(); // clienteId - valor em aberto
 
     for (const e of entregasAnteriores) {
       if (!e.cliente) continue; // ignoramos entregas sem cliente associado
@@ -278,7 +294,7 @@ exports.inadimplencia = async (req, res) => {
       (v) => v > 0
     ).length;
 
-    // "Pagantes" = clientes SEM pendência anterior
+    // Pagantes = clientes SEM pendência anterior
     const pagantes = Math.max(0, totalClientes - inadimplentes);
 
     return res.json({ pagantes, inadimplentes });
@@ -288,7 +304,7 @@ exports.inadimplencia = async (req, res) => {
   }
 };
 
-// (opcional / não usado no front atual)
+// (ainda não usado no front atual)
 exports.produtosMaisEntregues = async (req, res) => {
   try {
     const padariaId = getPadariaFromReq(req);
@@ -319,7 +335,7 @@ exports.produtosMaisEntregues = async (req, res) => {
   }
 };
 
-// /analitico/entregas-por-entregador?padaria=...
+// analitico/entregas-por-entregador?padaria=<IDpadaria>
 exports.entregasPorEntregador = async (req, res) => {
   try {
     const padariaParam =
@@ -377,7 +393,7 @@ exports.entregasPorEntregador = async (req, res) => {
   }
 };
 
-// (opcionais não usados no front agora)
+// (ainda não usado no front atual)
 exports.problemasPorTipo = async (req, res) => {
   try {
     const padariaId = getPadariaFromReq(req);
@@ -420,7 +436,7 @@ exports.problemasPorCliente = async (req, res) => {
   }
 };
 
-// /analitico/formas-pagamento (opcional)
+// analitico/formas-pagamento (opcional)
 exports.formasDePagamento = async (req, res) => {
   try {
     const padariaId = getPadariaFromReq(req);
@@ -452,7 +468,7 @@ exports.formasDePagamento = async (req, res) => {
   }
 };
 
-// (opcional)
+// (ainda não usado no front atual)
 exports.clientesPorMes = async (_req, res) => {
   try {
     const resultado = await Usuario.aggregate([
@@ -475,15 +491,14 @@ exports.clientesPorMes = async (_req, res) => {
   }
 };
 
-// /analitico/faturamento-mensal?padaria=...
-// retorna: [{ mes: 'YYYY-MM', valorTotal: Number }, ...]
-// Soma pagamentos normais + entregas avulsas do respectivo mês
+// /analitico/faturamento-mensal?padaria=<IDpadaria>
+// Soma pagamentos normais e entregas avulsas do respectivo mês
 exports.faturamentoMensal = async (req, res) => {
   try {
     const padariaId = getPadariaFromReq(req);
     if (!padariaId) return res.json([]);
 
-    // 1) Pagamentos das entregas "normais"
+    // 1) Pagamentos das entregas normais
     const normal = await Entrega.aggregate([
       {
         $match: {
@@ -519,8 +534,8 @@ exports.faturamentoMensal = async (req, res) => {
       { $sort: { _id: -1 } },
     ]);
 
-    // 3) Mesclar os dois resultados por mês
-    const mapa = new Map(); // mes -> total
+    // 3) Juntar os dois resultados por mês
+    const mapa = new Map(); // mes - total
     for (const r of normal)
       mapa.set(r._id, (mapa.get(r._id) || 0) + r.totalPago);
     for (const r of avulsas)
@@ -537,24 +552,30 @@ exports.faturamentoMensal = async (req, res) => {
   }
 };
 
-// GET /analitico/a-receber?padaria=...&mes=YYYY-MM
-// Implementa: Previsto/Pago/Pendente do mês + "Em atraso" (meses anteriores),
+// GET /analitico/a-receber?padaria=<IDpadaria>&mes=YYYY-MM
 // com corte no dia 8 do mês seguinte a cada mês de origem.
 exports.aReceberMensal = async (req, res) => {
   try {
-    const padariaId = getPadariaFromReq(req) || req.usuario?.padaria;
+    // valida query e bloqueia extras
+    const { error: qErr, value: qVal } = aReceberMensalQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    const padariaId =
+      qVal.padaria || getPadariaFromReq(req) || req.usuario?.padaria;
     if (!padariaId) {
       return res.status(400).json({ erro: "Padaria não informada." });
     }
 
-    const { ini, fim, mesStr } = mesRange(req.query.mes); // mês selecionado [ini, fim)
+    const { ini, fim, mesStr } = mesRange(qVal.mes); // mês selecionado [ini, fim)
     const padaria = toObjectIdIfValid(padariaId);
 
-    // Data de referência para a regra do dia 8 (pode simular no Postman com ?ref=YYYY-MM-DD)
-    const ref = req.query.ref ? new Date(req.query.ref) : new Date();
+    // Data de referência para a regra do dia 8
+    const ref = qVal.ref ? new Date(qVal.ref) : new Date();
     ref.setHours(0, 0, 0, 0);
 
-    // ===== 0) CORTE GLOBAL: primeiro mês com movimento (entrega, pagamento ou avulsa)
+    // CORTE GLOBAL: primeiro mês com movimento (entrega, pagamento ou avulsa)
     const [minEntregaDoc] = await Entrega.find({ padaria })
       .sort({ createdAt: 1 })
       .limit(1)
@@ -597,7 +618,7 @@ exports.aReceberMensal = async (req, res) => {
           )
         : null;
 
-    // Se não houve movimento algum OU o mês selecionado termina <= 1º mês c/ movimento → zera
+    // Se não houve movimento algum ou o mês selecionado termina <= 1º mês c/ movimento - zera
     if (primeiroMovTS === null || fim <= (primeiroMovIniMes ?? fim)) {
       const clientesZero = await Cliente.find({ padaria })
         .select("nome rota")
@@ -618,7 +639,7 @@ exports.aReceberMensal = async (req, res) => {
         previstoMesAtual: 0,
         pagoMes: 0,
         pendenteAtual: 0,
-        pendenciaAnterior: 0, // compat (reflete apenas mês anterior; aqui 0)
+        pendenciaAnterior: 0,
         emAtrasoTotal: 0,
         emAtrasoPorMes: [],
         totalAReceber: 0,
@@ -626,7 +647,7 @@ exports.aReceberMensal = async (req, res) => {
       });
     }
 
-    // ===== 1) Carrega clientes (p/ previsto via padrão semanal)
+    // 1) Carrega clientes (p/ previsto via padrão semanal)
     const clientes = await Cliente.find({ padaria })
       .populate(POP_PADRAO)
       .select("nome rota padraoSemanal inicioCicloFaturamento createdAt")
@@ -659,7 +680,7 @@ exports.aReceberMensal = async (req, res) => {
       .lean();
     const mapAjusteAnterior = buildAjusteMap(ajustesAntDocs);
 
-    // ===== 2) MÊS SELECIONADO: previsto/pago/pendente POR CLIENTE (com ajustes)
+    // 2) MÊS SELECIONADO: previsto/pago/pendente POR CLIENTE
     const previstoMesPorCliente = new Map();
     for (const cli of clientes) {
       previstoMesPorCliente.set(
@@ -730,7 +751,7 @@ exports.aReceberMensal = async (req, res) => {
     ]);
     const pagoAvulsasMes = round2(pagoAvulsasArr[0]?.total || 0);
 
-    // ===== 3) EM ATRASO (por mês) — todos os meses anteriores ao selecionado, com corte no dia 8
+    // 3) EM ATRASO (por mês) — todos os meses anteriores ao selecionado, com corte no dia 8
     const addMonths = (d, n) => {
       const x = new Date(d);
       x.setMonth(x.getMonth() + n);
@@ -1016,7 +1037,13 @@ exports.entregasTempoReal = async (req, res) => {
 // /analitico/pagamentos (com filtros)
 exports.pagamentosDetalhados = async (req, res) => {
   try {
-    const { dataInicial, dataFinal, dataEspecifica, forma } = req.query;
+    // valida query e bloqueia campos desconhecidos
+    const { error: qErr, value: qVal } =
+      pagamentosDetalhadosQuerySchema.validate(req.query || {});
+    if (qErr)
+      return res.status(400).json({ mensagem: qErr.details[0].message });
+
+    const { dataInicial, dataFinal, dataEspecifica, forma } = qVal;
 
     const padaria = toObjectIdIfValid(
       getPadariaFromReq(req) || req.usuario.padaria
@@ -1338,12 +1365,19 @@ exports.notificacoesRecentes = async (req, res) => {
 // e a quantidade de clientes em atraso. Ignora meses anteriores ao primeiro movimento.
 exports.pendenciasAnuais = async (req, res) => {
   try {
-    const padariaId = getPadariaFromReq(req) || req.usuario?.padaria;
+    // valida query e bloqueia extras
+    const { error: qErr, value: qVal } = pendenciasAnuaisQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    const padariaId =
+      qVal.padaria || getPadariaFromReq(req) || req.usuario?.padaria;
     if (!padariaId)
       return res.status(400).json({ erro: "Padaria não informada." });
 
-    const ano = Number(req.query.ano) || new Date().getFullYear();
-    const gracaDia = Math.min(31, Math.max(1, Number(req.query.gracaDia) || 8));
+    const ano = Number(qVal.ano) || new Date().getFullYear();
+    const gracaDia = Math.min(31, Math.max(1, Number(qVal.gracaDia) || 8));
     const padaria = toObjectIdIfValid(padariaId);
 
     // Descobre o 1º mês com movimento (entrega criada, pagamento ou avulsa)
@@ -1509,14 +1543,21 @@ exports.pendenciasAnuais = async (req, res) => {
 // Lista clientes pendentes no mês selecionado + flag 'liberado' conforme regra do dia 8.
 exports.pendenciasDoMes = async (req, res) => {
   try {
-    const padariaId = getPadariaFromReq(req) || req.usuario?.padaria;
+    // valida query e bloqueia extras
+    const { error: qErr, value: qVal } = pendenciasDoMesQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    const padariaId =
+      qVal.padaria || getPadariaFromReq(req) || req.usuario?.padaria;
     if (!padariaId)
       return res.status(400).json({ erro: "Padaria não informada." });
 
-    const { ini, fim, mesStr } = mesRange(req.query.mes);
+    const { ini, fim, mesStr } = mesRange(qVal.mes);
     const ano = ini.getFullYear();
     const mesIndex = ini.getMonth(); // 0..11
-    const gracaDia = Math.min(31, Math.max(1, Number(req.query.gracaDia) || 8));
+    const gracaDia = Math.min(31, Math.max(1, Number(qVal.gracaDia) || 8));
     const padaria = toObjectIdIfValid(padariaId);
 
     // Descobre 1º mês com movimento para não mostrar dados antes do histórico real
@@ -1641,5 +1682,69 @@ exports.pendenciasDoMes = async (req, res) => {
   } catch (erro) {
     console.error("Erro em pendenciasDoMes:", erro);
     return res.status(500).json({ erro: "Erro ao listar pendências do mês." });
+  }
+};
+
+// /analitico/media-produtos-por-entrega?padaria=...&dataInicio=ISO&dataFim=ISO
+// Retorna média de itens de produto por entrega no período (createdAt)
+exports.mediaProdutosPorEntrega = async (req, res) => {
+  try {
+    // valida e bloqueia campos desconhecidos na query
+    const { error: qErr, value: qVal } = mediaProdutosQuerySchema.validate(
+      req.query || {}
+    );
+    if (qErr) return res.status(400).json({ erro: qErr.details[0].message });
+
+    const padariaId = qVal.padaria || req.usuario?.padaria || null;
+    if (!padariaId) {
+      return res.status(400).json({ erro: "Padaria não informada." });
+    }
+
+    const padaria = toObjectIdIfValid(padariaId);
+
+    // filtro de datas (opcional) por createdAt
+    const match = { padaria };
+    if (qVal.dataInicio || qVal.dataFim) {
+      match.createdAt = {};
+      if (qVal.dataInicio) match.createdAt.$gte = new Date(qVal.dataInicio);
+      if (qVal.dataFim) match.createdAt.$lt = new Date(qVal.dataFim);
+    }
+
+    const agg = await Entrega.aggregate([
+      { $match: match },
+      {
+        $project: {
+          qtd: {
+            $size: { $ifNull: ["$produtos", []] },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          media: { $avg: "$qtd" },
+          totalEntregas: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          media: { $ifNull: ["$media", 0] },
+          totalEntregas: 1,
+        },
+      },
+    ]);
+
+    const out = agg[0] || { media: 0, totalEntregas: 0 };
+    // Arredonda para 2 casas para manter consistência com outros endpoints numéricos
+    return res.json({
+      media: round2(out.media),
+      totalEntregas: out.totalEntregas,
+    });
+  } catch (erro) {
+    console.error("Erro em mediaProdutosPorEntrega:", erro);
+    return res
+      .status(500)
+      .json({ erro: "Erro ao calcular média de produtos por entrega." });
   }
 };
